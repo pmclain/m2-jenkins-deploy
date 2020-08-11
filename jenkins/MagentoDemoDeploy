@@ -1,0 +1,36 @@
+pipeline {
+    agent {
+        node {
+            label 'master'
+        }
+    }
+
+    parameters {
+        string(
+            name: 'reference',
+            defaultValue: '2.4.0'
+        )
+    }
+
+    stages {
+        stage('Deploy') {
+            steps {
+                sh 'rm -rf build; mkdir build'
+
+                copyArtifacts(
+                    projectName: 'm2-demo-store/BuildDemoStore',
+                    parameters: "reference=${env.reference}"
+                )
+
+                ansiblePlaybook(
+                    installation: '/usr/bin/ansible',
+                    playbook: 'ansible/deploy.yml',
+                    inventory: 'ansible/hosts',
+                    credentialsId: 'm2demo-private-key', // SSH credential
+                    vaultCredentialsId: 'm2demo-vault-key', // TXT credential
+                    colorized: true
+                )
+            }
+        }
+    }
+}

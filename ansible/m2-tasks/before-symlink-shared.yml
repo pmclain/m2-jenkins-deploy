@@ -1,0 +1,22 @@
+---
+- name: Unpack build artifact archive
+  unarchive:
+    src: "{{ ansistrano_release_path.stdout }}/output.tar.gz"
+    dest: "{{ ansistrano_release_path.stdout }}/"
+    remote_src: yes
+
+- name: Remove build artifact archive
+  file:
+    name: "{{ ansistrano_release_path.stdout }}/{{ item }}"
+    state: absent
+  with_items:
+    - output.tar.gz
+    - build
+
+- name: Fix permissions
+  file:
+    name: "{{ ansistrano_release_path.stdout }}"
+    state: directory
+    owner: nginx
+    group: nginx
+    recurse: true

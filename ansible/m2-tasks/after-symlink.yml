@@ -1,0 +1,30 @@
+---
+- name: Restart php-fpm
+  docker_container:
+    name: "{{ docker_name_php }}"
+    image: "m2-php-fpm:7.3"
+    state: started
+    restart: yes
+    links:
+      - "{{ docker_name_session }}"
+      - "{{ docker_name_cache }}"
+      - "{{ docker_name_db }}"
+      - "{{ docker_name_elasticsearch }}"
+      - "{{ docker_name_amqp }}"
+      - "{{ docker_name_varnish }}"
+    volumes:
+      - "/var/www/vhosts/{{ hostname }}:/var/www/vhosts/{{ hostname }}"
+      - "/etc/passwd:/etc/passwd"
+    ports:
+      - "{{ php_port }}:9000"
+
+- name: 'Run setup:upgrade'
+  command: "docker exec {{ docker_name_php }} sudo -unginx php {{ ansistrano_release_path.stdout }}/bin/magento setup:upgrade --keep-generated"
+  when: "inventory_hostname in groups['cron'] and not 'All modules are up to date' in schema_status.stdout"
+
+- name: 'Flush Cache'
+  command: "docker exec {{ docker_name_php }} sudo -unginx php {{ ansistrano_release_path.stdout }}/bin/magento cache:flush"
+  when: "inventory_hostname in groups['cron'] and 'All modules are up to date' in schema_status.stdout"
+
+- name: 'Disable maintenance mode'
+  command: "docker exec {{ docker_name_php }} sudo -unginx php {{ ansistrano_release_path.stdout }}/bin/magento main:dis"

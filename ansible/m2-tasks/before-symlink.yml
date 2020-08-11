@@ -1,0 +1,21 @@
+---
+- name: 'Check schema status'
+  command: |
+    docker run -it --rm \
+      -v /var/www/vhosts/{{ hostname }}:/var/www/vhosts/{{ hostname }} \
+      --link {{ docker_name_session }} \
+      --link {{ docker_name_cache }} \
+      --link {{ docker_name_db }} \
+      --link {{ docker_name_elasticsearch }} \
+      --link {{ docker_name_amqp }} \
+      --link {{ docker_name_varnish }} \
+      m2-php-fpm:7.3 \
+      sudo -unginx php {{ ansistrano_release_path.stdout }}/bin/magento setup:db:status
+  register: schema_status
+  ignore_errors: true
+
+- name: Enable maintenance mode
+  file:
+    name: "{{ ansistrano_release_path.stdout }}/var/.maintenance.flag"
+    state: touch
+  when: "not 'All modules are up to date' in schema_status.stdout"

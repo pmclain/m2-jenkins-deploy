@@ -1,0 +1,208 @@
+---
+- name: Install rsync
+  yum:
+    name: rsync
+    state: present
+
+- name: Create required directories
+  file:
+    name: "/var/www/vhosts/{{ hostname }}/{{ item }}"
+    state: directory
+    owner: nginx
+    group: nginx
+  with_items:
+    - releases
+    - shared/app/etc
+    - shared/var
+    - shared/pub/media
+
+- name: Add env.php
+  template:
+    src: templates/app/etc/env.php.j2
+    dest: "/var/www/vhosts/{{ hostname }}/shared/app/etc/env.php"
+    owner: nginx
+    group: nginx
+    mode: '0644'
+
+- name: Create directory for php-fpm docker files
+  file:
+    name: /var/docker
+    state: directory
+    group: root
+    owner: root
+    mode: "775"
+
+- name: Copy php-fpm docker files
+  copy:
+    src: files/php-fpm
+    dest: /var/docker/
+
+- name: Copy Dockerfile
+  template:
+    src: templates/Dockerfile
+    dest: /var/docker/php-fpm/Dockerfile
+
+- name: Build php-fpm image
+  docker_image:
+    name: "m2-php-fpm:7.3"
+    build:
+      path: /var/docker/php-fpm
+      pull: no
+    source: build
+    force_source: yes
+
+- name: Open firewall for nginx
+  firewalld:
+    port: "{{ backend_port }}/tcp"
+    permanent: yes
+    immediate: yes
+    state: enabled
+
+- name: Create network bridge
+  docker_network:
+    name: "network-{{ docker_name_varnish }}"
+    ipam_config:
+      - subnet: "172.18.0.0/16"
+        gateway: "172.18.0.1"
+
+- name: Create vcl directory
+  file:
+    name: /var/m2varnish
+    state: directory
+    group: root
+    owner: root
+    mode: '775'
+
+- name: Create vcl
+  template:
+    src: templates/etc/varnish/default.vcl
+    dest: /var/m2varnish/
+
+- name: Start varnish
+  docker_container:
+    name: "{{ docker_name_varnish }}"
+    image: "varnish:6"
+    state: started
+    restart: yes
+    volumes:
+      - "/var/m2varnish/default.vcl:/etc/varnish/default.vcl"
+    ports:
+      - "{{ varnish_port }}:80"
+    networks:
+      - name: "network-{{ docker_name_varnish }}"
+
+- name: Check if ssl cert exists for host
+  stat:
+    path: "/etc/letsencrypt/live/{{ hostname }}/fullchain.pem"
+  register: m2_ssl
+
+- name: Stop nginx
+  service:
+    name: nginx
+    state: stopped
+  when: m2_ssl.stat.exists == false
+
+- name: Generate ssl cert
+  docker_container:
+    name: letsencrypt
+    image: certbot/certbot
+    auto_remove: yes
+    ports:
+      - "80:80"
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+    command: "certonly -n -m {{ letsencrypt_email }} --agree-tos -d {{ hostname }} --standalone"
+  when: m2_ssl.stat.exists == false
+
+- name: Add virtual host
+  template:
+    src: templates/etc/nginx/conf.d/magento.conf.j2
+    dest: /etc/nginx/conf.d/{{ hostname }}.conf
+
+- name: Restart nginx
+  service:
+    name: nginx
+    state: restarted
+
+- name: Create persistent volumes
+  docker_volume:
+    name: "vol-{{ item }}"
+    state: present
+  loop:
+    - "{{ docker_name_elasticsearch}}"
+    - "{{ docker_name_db }}"
+    - "{{ docker_name_cache }}"
+    - "{{ docker_name_session }}"
+
+- name: Start backend cache
+  docker_container:
+    name: "{{ docker_name_cache }}"
+    image: redis:5-alpine
+    state: started
+    volumes:
+      - "vol-{{ docker_name_cache }}:/data"
+
+- name: Start session cache
+  docker_container:
+    name: "{{ docker_name_session }}"
+    image: redis:5-alpine
+    state: started
+    volumes:
+      - "vol-{{ docker_name_session }}:/data"
+
+- name: Start rabbitmq
+  docker_container:
+    name: "{{ docker_name_amqp }}"
+    image: rabbitmq:3.8-alpine
+    state: started
+
+- name: Set vm.mx_map_count
+  sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    state: present
+
+- name: Start elasticsearch
+  docker_container:
+    name: "{{ docker_name_elasticsearch }}"
+    image: elasticsearch:7.8.1
+    state: started
+    volumes:
+      - "vol-{{ docker_name_elasticsearch }}:/usr/share/elasticsearch/data"
+    env:
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+      discovery.type: "single-node"
+
+- name: Start mysql
+  docker_container:
+    name: "{{ docker_name_db }}"
+    image: "percona:5.7"
+    state: started
+    volumes:
+      - "vol-{{ docker_name_db }}:/var/lib/mysql"
+    ports:
+      - "{{ db_port }}:3306"
+    env:
+      MYSQL_ROOT_PASSWORD: "{{ db_root_password }}"
+      MYSQL_DATABASE: "{{ db_name }}"
+      MYSQL_USER: "{{ db_user }}"
+      MYSQL_PASSWORD: "{{ db_password }}"
+
+- name: Start php-fpm
+  docker_container:
+    name: "{{ docker_name_php }}"
+    image: "m2-php-fpm:7.3"
+    state: started
+    links:
+      - "{{ docker_name_session }}"
+      - "{{ docker_name_cache }}"
+      - "{{ docker_name_db }}"
+      - "{{ docker_name_elasticsearch }}"
+      - "{{ docker_name_amqp }}"
+      - "{{ docker_name_varnish }}"
+    volumes:
+      - "/var/www/vhosts/{{ hostname }}:/var/www/vhosts/{{ hostname }}"
+      - "/etc/passwd:/etc/passwd"
+    ports:
+      - "{{ php_port }}:9000"
